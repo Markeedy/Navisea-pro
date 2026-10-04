@@ -1,0 +1,6 @@
+{
+  "name": "NaviSea Pro - Marine Navigation & Solunar Fishery System",
+  "description": "Système professionnel d'aide à la navigation maritime, traceur de cartes S-52/S-57, télémétrie Signal K, décodage AIS, prévisions météo marine et théorie solunaire.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
