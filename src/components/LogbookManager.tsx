@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useNavigationStore } from '../store/useNavigationStore';
 import { LogbookCategory, LogbookEntry, FishCatchRecord } from '../types/marine';
 import { LogbookTrendChart } from './LogbookTrendChart';
@@ -23,6 +23,12 @@ import {
   MapPin,
   Clock,
   User,
+  Archive,
+  Upload,
+  FolderArchive,
+  FileText,
+  Check,
+  Sparkles,
 } from 'lucide-react';
 
 export const LogbookManager: React.FC = () => {
@@ -32,12 +38,24 @@ export const LogbookManager: React.FC = () => {
     logbookEntries,
     addLogbookEntry,
     deleteLogbookEntry,
+    importLogbookEntries,
   } = useNavigationStore();
 
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<LogbookCategory | 'ALL'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [successToast, setSuccessToast] = useState<string | null>(null);
+
+  // État du Centre d'Archivage et d'Exportation des Croisières
+  const [isArchiveModalOpen, setIsArchiveModalOpen] = useState(false);
+  const [archiveFormat, setArchiveFormat] = useState<'GPX' | 'CSV' | 'JSON'>('GPX');
+  const [cruiseName, setCruiseName] = useState('Croisière Manche & Anglo-Normandes 2026');
+  const [skipperName, setSkipperName] = useState('Capitaine Dubois');
+  const [csvDelimiter, setCsvDelimiter] = useState<';' | ','>(';');
+  const [includeTrackInGpx, setIncludeTrackInGpx] = useState(true);
+  const [includeWaypointsInGpx, setIncludeWaypointsInGpx] = useState(true);
+  const [exportCategoryFilter, setExportCategoryFilter] = useState<LogbookCategory | 'ALL'>('ALL');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Champs du formulaire
   const [title, setTitle] = useState('');
@@ -149,89 +167,269 @@ export const LogbookManager: React.FC = () => {
     setTimeout(() => setSuccessToast(null), 3000);
   };
 
-  // Export CSV
-  const handleExportCsv = () => {
+  // EXPORTATION CSV ENCODÉ EN UTF-8 AVEC BOM POUR EXCEL & TABLEURS
+  const handleExportCsv = (
+    entriesToExport = logbookEntries,
+    delimiter = csvDelimiter,
+    customFilename?: string
+  ) => {
+    const filtered =
+      exportCategoryFilter === 'ALL'
+        ? entriesToExport
+        : entriesToExport.filter((e) => e.category === exportCategoryFilter);
+
     const headers = [
       'ID',
-      'Date Heure (ISO)',
-      'Latitude',
-      'Longitude',
-      'Coordonnees Nautiques',
-      'SOG (knots)',
-      'COG (deg)',
+      'Date Heure UTC (ISO)',
+      'Date Heure Locale',
+      'Latitude WGS84',
+      'Longitude WGS84',
+      'Coordonnees Nautiques (DMM)',
+      'Vitesse Fond SOG (kn)',
+      'Route Fond COG (deg)',
       'Sonde Quille (m)',
-      'Vent Vitesse (knots)',
+      'Vent Vitesse (kn)',
       'Vent Direction (deg)',
       'Hauteur Vagues (m)',
-      'Pression (hPa)',
-      'Temp Eau (C)',
-      'Categorie',
-      'Titre',
-      'Observations',
-      'Equipage',
+      'Pression Mer (hPa)',
+      'Temperature Eau (C)',
+      'Categorie Observation',
+      'Titre Evenement',
+      'Observations & Remarques',
+      'Captures Halieutiques',
+      'Officier de Quart',
+      'Horametre Moteur (h)',
     ];
 
-    const rows = logbookEntries.map((e) => [
-      e.id,
-      e.isoDate,
-      e.position.latitude.toFixed(6),
-      e.position.longitude.toFixed(6),
-      `"${formatNauticalCoords(e.position.latitude, e.position.longitude)}"`,
-      e.sog.toFixed(1),
-      Math.round(e.cog),
-      e.depthBelowKeel.toFixed(1),
-      e.weatherSummary.windSpeedKnots,
-      e.weatherSummary.windDirectionDeg,
-      e.weatherSummary.waveHeightMeters.toFixed(1),
-      e.weatherSummary.surfacePressureHpa,
-      e.weatherSummary.seaSurfaceTemp ?? '',
-      e.category,
-      `"${e.title.replace(/"/g, '""')}"`,
-      `"${e.notes.replace(/"/g, '""')}"`,
-      `"${e.crewMember ?? ''}"`,
-    ]);
+    const rows = filtered.map((e) => {
+      const catchesSummary = e.fishCatches
+        ? e.fishCatches
+            .map((c) => `${c.quantity}x ${c.species}${c.weightKg ? ` (${c.weightKg}kg)` : ''}${c.lureUsed ? ` [${c.lureUsed}]` : ''}`)
+            .join(' | ')
+        : '';
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `NaviSea_LivreDeBord_${new Date().toISOString().substring(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
+      return [
+        e.id,
+        e.isoDate,
+        new Date(e.timestamp).toLocaleString('fr-FR'),
+        e.position.latitude.toFixed(6),
+        e.position.longitude.toFixed(6),
+        `"${formatNauticalCoords(e.position.latitude, e.position.longitude)}"`,
+        e.sog.toFixed(1),
+        Math.round(e.cog),
+        e.depthBelowKeel.toFixed(1),
+        e.weatherSummary.windSpeedKnots,
+        e.weatherSummary.windDirectionDeg,
+        e.weatherSummary.waveHeightMeters.toFixed(1),
+        e.weatherSummary.surfacePressureHpa,
+        e.weatherSummary.seaSurfaceTemp ?? '',
+        e.category,
+        `"${e.title.replace(/"/g, '""')}"`,
+        `"${e.notes.replace(/"/g, '""')}"`,
+        `"${catchesSummary.replace(/"/g, '""')}"`,
+        `"${e.crewMember ?? ''}"`,
+        e.engineHours ?? '',
+      ].join(delimiter);
+    });
 
-  // Export GPX pour traceurs Garmin / Furuno / Raymarine / Navionics
-  const handleExportGpx = () => {
-    const waypoints = logbookEntries
-      .map(
-        (e) => `
-    <wpt lat="${e.position.latitude.toFixed(6)}" lon="${e.position.longitude.toFixed(6)}">
-      <time>${e.isoDate}</time>
-      <name>${e.title.replace(/[<&>]/g, '')}</name>
-      <desc>Cat: ${e.category} | SOG: ${e.sog} kn | COG: ${e.cog}° | Sonde: ${e.depthBelowKeel}m | Vent: ${e.weatherSummary.windSpeedKnots}kn</desc>
-      <sym>Flag, Blue</sym>
-    </wpt>`
-      )
-      .join('');
-
-    const gpxContent = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="NaviSea Pro Marine System" xmlns="http://www.topografix.com/GPX/1/1">
-  <metadata>
-    <name>NaviSea Pro - Journal de Bord</name>
-    <time>${new Date().toISOString()}</time>
-  </metadata>${waypoints}
-</gpx>`;
-
-    const blob = new Blob([gpxContent], { type: 'application/gpx+xml' });
+    // Insertion du BOM UTF-8 (\uFEFF) pour compatibilité Microsoft Excel universelle
+    const csvContent = '\uFEFF' + headers.join(delimiter) + '\n' + rows.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
+    const safeName = (customFilename || cruiseName || 'Livre_de_Bord').replace(/[^a-zA-Z0-9_-]/g, '_');
     link.setAttribute('href', url);
-    link.setAttribute('download', `NaviSea_Journal_${new Date().toISOString().substring(0, 10)}.gpx`);
+    link.setAttribute('download', `${safeName}_${new Date().toISOString().substring(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+
+    setSuccessToast(`Export CSV réussi (${filtered.length} entrées exportées)`);
+    setTimeout(() => setSuccessToast(null), 3000);
+  };
+
+  // EXPORTATION GPX 1.1 MARITIME ÉTENDUE (Garmin, Furuno, Raymarine, Navionics, OpenCPN)
+  const handleExportGpx = (
+    entriesToExport = logbookEntries,
+    customFilename?: string
+  ) => {
+    const filtered =
+      exportCategoryFilter === 'ALL'
+        ? entriesToExport
+        : entriesToExport.filter((e) => e.category === exportCategoryFilter);
+
+    // Tri chronologique ascendant pour le tracé de route
+    const sorted = [...filtered].sort((a, b) => a.timestamp - b.timestamp);
+
+    // 1. Waypoints individuels avec symboles maritimes
+    const waypointsXml = includeWaypointsInGpx
+      ? sorted
+          .map((e) => {
+            const sym =
+              e.category === 'FISHING'
+                ? 'Fish Symbol'
+                : e.category === 'ANCHOR'
+                ? 'Anchor'
+                : e.category === 'WEATHER'
+                ? 'Atmospheric'
+                : e.category === 'ENGINE'
+                ? 'Wrench'
+                : e.category === 'SECURITY'
+                ? 'Danger Area'
+                : 'Flag, Blue';
+
+            const catchesStr = e.fishCatches
+              ? ' | Prises: ' + e.fishCatches.map((c) => `${c.quantity}x ${c.species}`).join(', ')
+              : '';
+
+            const desc = `Cat: ${e.category} | SOG: ${e.sog} kn | COG: ${e.cog}° | Sonde: ${e.depthBelowKeel}m | Vent: ${e.weatherSummary.windSpeedKnots}kn (${e.weatherSummary.windDirectionDeg}°) | Pression: ${e.weatherSummary.surfacePressureHpa} hPa${catchesStr} | Notes: ${e.notes}`.replace(/[<&>]/g, ' ');
+
+            return `  <wpt lat="${e.position.latitude.toFixed(6)}" lon="${e.position.longitude.toFixed(6)}">
+    <time>${e.isoDate}</time>
+    <name>${e.title.replace(/[<&>]/g, ' ')}</name>
+    <desc>${desc}</desc>
+    <sym>${sym}</sym>
+    <type>${e.category}</type>
+  </wpt>`;
+          })
+          .join('\n')
+      : '';
+
+    // 2. Route maritime séquentielle
+    const routeXml = `  <rte>
+    <name>${cruiseName.replace(/[<&>]/g, ' ')} - Route Planifiée</name>
+    <desc>Navigation officielle du navire ${vessel.name}</desc>
+${sorted
+  .map(
+    (e) => `    <rtept lat="${e.position.latitude.toFixed(6)}" lon="${e.position.longitude.toFixed(6)}">
+      <time>${e.isoDate}</time>
+      <name>${e.title.replace(/[<&>]/g, ' ')}</name>
+    </rtept>`
+  )
+  .join('\n')}
+  </rte>`;
+
+    // 3. Trace continue (Track) avec vitesses et caps cinématiques
+    const trackXml = includeTrackInGpx
+      ? `  <trk>
+    <name>${cruiseName.replace(/[<&>]/g, ' ')} - Trace de Navigation</name>
+    <trkseg>
+${sorted
+  .map((e) => {
+    const speedMs = (e.sog * 0.514444).toFixed(2);
+    return `      <trkpt lat="${e.position.latitude.toFixed(6)}" lon="${e.position.longitude.toFixed(6)}">
+        <ele>${-e.depthBelowKeel}</ele>
+        <time>${e.isoDate}</time>
+        <course>${Math.round(e.cog)}</course>
+        <speed>${speedMs}</speed>
+      </trkpt>`;
+  })
+  .join('\n')}
+    </trkseg>
+  </trk>`
+      : '';
+
+    const gpxDocument = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" 
+     creator="NaviSea Pro Marine Navigation System - ECDIS S-52"
+     xmlns="http://www.topografix.com/GPX/1/1"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">
+  <metadata>
+    <name>${cruiseName.replace(/[<&>]/g, ' ')}</name>
+    <desc>Journal de bord du navire ${vessel.name} (${vessel.id}) - Skipper: ${skipperName}</desc>
+    <author>
+      <name>${skipperName.replace(/[<&>]/g, ' ')}</name>
+    </author>
+    <time>${new Date().toISOString()}</time>
+  </metadata>
+${waypointsXml}
+${routeXml}
+${trackXml}
+</gpx>`;
+
+    const blob = new Blob([gpxDocument], { type: 'application/gpx+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const safeName = (customFilename || cruiseName || 'Livre_de_Bord').replace(/[^a-zA-Z0-9_-]/g, '_');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `${safeName}_${new Date().toISOString().substring(0, 10)}.gpx`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setSuccessToast(`Export GPX 1.1 réussi (${filtered.length} points de trace & waypoints générés)`);
+    setTimeout(() => setSuccessToast(null), 3000);
+  };
+
+  // EXPORTATION JSON (ARCHIVE NUMÉRIQUE INTÉGRALE)
+  const handleExportJson = (customFilename?: string) => {
+    const archivePayload = {
+      archiveVersion: '2.4.0',
+      archiveType: 'NAVISEA_LOGBOOK_CRUISE_BACKUP',
+      exportedAt: new Date().toISOString(),
+      cruiseMetadata: {
+        cruiseName,
+        skipperName,
+        vesselId: vessel.id,
+        vesselName: vessel.name,
+        vesselDraft: vessel.draft,
+      },
+      totalEntries: logbookEntries.length,
+      entries: logbookEntries,
+    };
+
+    const jsonString = JSON.stringify(archivePayload, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const safeName = (customFilename || cruiseName || 'Archive_Croisiere').replace(/[^a-zA-Z0-9_-]/g, '_');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `${safeName}_${new Date().toISOString().substring(0, 10)}.json`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setSuccessToast(`Archive JSON intégrale exportée avec succès`);
+    setTimeout(() => setSuccessToast(null), 3000);
+  };
+
+  // RESTAURATION / IMPORTATION D'UNE ARCHIVE JSON
+  const handleImportJsonFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const content = event.target?.result as string;
+        const parsed = JSON.parse(content);
+
+        let importedList: LogbookEntry[] = [];
+        if (Array.isArray(parsed)) {
+          importedList = parsed;
+        } else if (parsed.entries && Array.isArray(parsed.entries)) {
+          importedList = parsed.entries;
+        }
+
+        if (importedList.length > 0) {
+          importLogbookEntries(importedList);
+          setSuccessToast(`${importedList.length} entrées de croisière importées et fusionnées avec succès !`);
+          setTimeout(() => setSuccessToast(null), 4000);
+          setIsArchiveModalOpen(false);
+        } else {
+          alert("Le fichier JSON ne contient pas d'entrées de journal de bord valides.");
+        }
+      } catch (err) {
+        alert("Erreur lors de la lecture de l'archive JSON : " + String(err));
+      }
+    };
+    reader.readAsText(file);
+    // Réinitialisation du champ
+    e.target.value = '';
   };
 
   // Filtrage des entrées
@@ -333,20 +531,30 @@ export const LogbookManager: React.FC = () => {
             Nouvelle Observation
           </button>
 
-          {/* Exportations */}
+          {/* Bouton d'ouverture du Centre d'Archivage Avancé */}
+          <button
+            onClick={() => setIsArchiveModalOpen(true)}
+            className="px-3 py-1.5 bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-700/80 text-indigo-300 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-md shadow-indigo-950/40"
+            title="Ouvrir le centre d'archivage externe des croisières (GPX 1.1, CSV Excel, JSON)"
+          >
+            <FolderArchive className="w-4 h-4 text-indigo-400" />
+            Archivage Croisière
+          </button>
+
+          {/* Exportations Rapides 1-clic */}
           <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-xs">
             <button
-              onClick={handleExportCsv}
+              onClick={() => handleExportCsv()}
               className="px-2.5 py-1.5 hover:bg-slate-800 text-slate-300 rounded font-semibold flex items-center gap-1 transition-colors"
-              title="Exporter sous format tableau CSV pour audit maritime"
+              title="Exporter sous format tableau CSV (Excel UTF-8 BOM) pour audit maritime"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
               CSV
             </button>
             <button
-              onClick={handleExportGpx}
+              onClick={() => handleExportGpx()}
               className="px-2.5 py-1.5 hover:bg-slate-800 text-slate-300 rounded font-semibold flex items-center gap-1 transition-colors"
-              title="Exporter les waypoints au format GPX pour traceurs Garmin, Furuno, Navionics"
+              title="Exporter au format GPX 1.1 pour traceurs Garmin, Furuno, Navionics, Raymarine"
             >
               <Download className="w-3.5 h-3.5 text-cyan-400" />
               GPX
@@ -354,6 +562,238 @@ export const LogbookManager: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* MODAL DU CENTRE D'ARCHIVAGE EXTERNE DES CROISIÈRES */}
+      {isArchiveModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-900 border border-indigo-500/50 rounded-2xl p-6 max-w-xl w-full shadow-2xl space-y-5 text-xs text-slate-200">
+            {/* En-tête de la modale */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-950 border border-indigo-700 rounded-lg">
+                  <Archive className="w-5 h-5 text-indigo-400" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wide">
+                    Centre d'Archivage Externe des Croisières
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Exportation certifiée pour traceurs nautiques, tableurs et sauvegarde pérenne
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsArchiveModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Métadonnées de la Croisière */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-950 p-3.5 rounded-xl border border-slate-800">
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1 font-semibold">Nom de la Croisière / Récit</label>
+                <input
+                  type="text"
+                  value={cruiseName}
+                  onChange={(e) => setCruiseName(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 font-medium"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1 font-semibold">Capitaine / Chef de Bord</label>
+                <input
+                  type="text"
+                  value={skipperName}
+                  onChange={(e) => setSkipperName(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 font-medium"
+                />
+              </div>
+            </div>
+
+            {/* Choix du Format d'Archivage */}
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1.5 font-semibold">Format d'Exportation Ciblé</label>
+              <div className="grid grid-cols-3 gap-2.5">
+                {/* Option GPX */}
+                <button
+                  type="button"
+                  onClick={() => setArchiveFormat('GPX')}
+                  className={`p-3 rounded-xl border flex flex-col items-start gap-1 text-left transition-all ${
+                    archiveFormat === 'GPX'
+                      ? 'bg-cyan-950/80 border-cyan-500 text-white shadow-lg shadow-cyan-950/50'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between w-full">
+                    <span className="font-bold text-xs text-cyan-400">GPX 1.1</span>
+                    {archiveFormat === 'GPX' && <Check className="w-3.5 h-3.5 text-cyan-400" />}
+                  </div>
+                  <span className="text-[10px] text-slate-300">
+                    Traceurs Garmin, Furuno, Raymarine, Navionics, OpenCPN
+                  </span>
+                </button>
+
+                {/* Option CSV */}
+                <button
+                  type="button"
+                  onClick={() => setArchiveFormat('CSV')}
+                  className={`p-3 rounded-xl border flex flex-col items-start gap-1 text-left transition-all ${
+                    archiveFormat === 'CSV'
+                      ? 'bg-emerald-950/80 border-emerald-500 text-white shadow-lg shadow-emerald-950/50'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between w-full">
+                    <span className="font-bold text-xs text-emerald-400">CSV Tableur</span>
+                    {archiveFormat === 'CSV' && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                  </div>
+                  <span className="text-[10px] text-slate-300">
+                    Excel (UTF-8 BOM), LibreOffice, Audit de Sécurité
+                  </span>
+                </button>
+
+                {/* Option JSON */}
+                <button
+                  type="button"
+                  onClick={() => setArchiveFormat('JSON')}
+                  className={`p-3 rounded-xl border flex flex-col items-start gap-1 text-left transition-all ${
+                    archiveFormat === 'JSON'
+                      ? 'bg-indigo-950/80 border-indigo-500 text-white shadow-lg shadow-indigo-950/50'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between w-full">
+                    <span className="font-bold text-xs text-indigo-400">JSON Archive</span>
+                    {archiveFormat === 'JSON' && <Check className="w-3.5 h-3.5 text-indigo-400" />}
+                  </div>
+                  <span className="text-[10px] text-slate-300">
+                    Sauvegarde intégrale &amp; Restauration ultérieure
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Options contextuelles selon le format */}
+            <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3.5 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-slate-400 font-semibold">Filtrer par Catégorie d'Entrées</span>
+                <select
+                  value={exportCategoryFilter}
+                  onChange={(e) => setExportCategoryFilter(e.target.value as any)}
+                  className="bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-xs text-white"
+                >
+                  <option value="ALL">Toutes les observations ({logbookEntries.length})</option>
+                  <option value="NAVIGATION">Navigation seulement</option>
+                  <option value="FISHING">Pêche &amp; Prises seulement</option>
+                  <option value="WEATHER">Météo &amp; Barométrie</option>
+                  <option value="ANCHOR">Mouillages &amp; Ports</option>
+                  <option value="ENGINE">Horamètre Moteur</option>
+                  <option value="SECURITY">Sécurité &amp; Exercices</option>
+                </select>
+              </div>
+
+              {archiveFormat === 'GPX' && (
+                <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-800/80 text-[11px]">
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={includeWaypointsInGpx}
+                      onChange={(e) => setIncludeWaypointsInGpx(e.target.checked)}
+                      className="accent-cyan-500 rounded"
+                    />
+                    <span>Inclure les Waypoints ({'<wpt>'})</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={includeTrackInGpx}
+                      onChange={(e) => setIncludeTrackInGpx(e.target.checked)}
+                      className="accent-cyan-500 rounded"
+                    />
+                    <span>Inclure la Trace continue ({'<trk>'})</span>
+                  </label>
+                </div>
+              )}
+
+              {archiveFormat === 'CSV' && (
+                <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 text-[11px]">
+                  <span className="text-slate-400">Séparateur de colonnes :</span>
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="delimiter"
+                        checked={csvDelimiter === ';'}
+                        onChange={() => setCsvDelimiter(';')}
+                        className="accent-emerald-500"
+                      />
+                      <span>Point-virgule (;) [Standard France/Europe]</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="delimiter"
+                        checked={csvDelimiter === ','}
+                        onChange={() => setCsvDelimiter(',')}
+                        className="accent-emerald-500"
+                      />
+                      <span>Virgule (,) [Standard US]</span>
+                    </label>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Zone de Restauration d'Archive */}
+            <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Upload className="w-4 h-4 text-slate-400" />
+                <span className="text-[11px] text-slate-400">Restaurer une archive existante :</span>
+              </div>
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleImportJsonFile}
+                accept=".json"
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors"
+              >
+                Importer Fichier JSON...
+              </button>
+            </div>
+
+            {/* Boutons d'Action Principaux */}
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setIsArchiveModalOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (archiveFormat === 'GPX') handleExportGpx();
+                  else if (archiveFormat === 'CSV') handleExportCsv();
+                  else handleExportJson();
+                  setIsArchiveModalOpen(false);
+                }}
+                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-600/30 flex items-center gap-2 transition-all"
+              >
+                <Download className="w-4 h-4" />
+                <span>Télécharger l'Archive ({archiveFormat})</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Formulaire de saisie détaillée */}
       {isFormOpen && (

@@ -146,3 +146,17 @@ export interface SignalKDeltaMessage {
     }[];
   }[];
 }
+
+export interface MobIncident {
+  isActive: boolean;
+  timestamp: number;
+  position: GeoCoordinate;
+  accuracy: number;
+  initialSog: number;
+  initialCog: number;
+  searchRadiusMeters: number; // Rayon variable du cercle de recherche SAR (ex: 50m, 100m, 250m, 500m)
+  currentBearingDeg: number;  // Cap vrai vers le point MOB depuis le navire
+  currentDistanceNM: number;  // Distance au point MOB en milles nautiques
+  currentDistanceMeters: number; // Distance au point MOB en mètres
+}
+

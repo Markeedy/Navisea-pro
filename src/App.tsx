@@ -21,7 +21,9 @@ import {
   CheckCircle2,
   AlertTriangle,
   BookOpen,
+  LifeBuoy,
 } from 'lucide-react';
+import { MobRescueModal } from './components/MobRescueModal';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'chart' | 'weather' | 'solunar' | 'telemetry' | 'logbook' | 'code'>('chart');
@@ -32,6 +34,8 @@ export default function App() {
     activeCollisionAlert,
     setKalmanActive,
     logbookEntries,
+    mobIncident,
+    triggerMob,
   } = useNavigationStore();
 
   // Démarrage des services maritimes en arrière-plan
@@ -113,8 +117,32 @@ export default function App() {
                 Mouillage
               </div>
             )}
+
+            {/* BOUTON D'URGENCE ABSOLUE HOMME À LA MER (MOB) */}
+            <button
+              onClick={() => {
+                if (!mobIncident?.isActive) {
+                  triggerMob();
+                }
+                setActiveTab('chart');
+              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 transition-all shadow-lg border-2 ${
+                mobIncident?.isActive
+                  ? 'bg-red-600 border-white text-white animate-bounce shadow-red-600/60'
+                  : 'bg-red-700/95 hover:bg-red-600 active:scale-95 border-red-400 text-white shadow-red-950/60'
+              }`}
+              title="Détresse Immédiate Homme à la Mer - Capture instantanée des coordonnées GPS et alarme de sauvetage"
+            >
+              <LifeBuoy className={`w-4 h-4 text-white ${mobIncident?.isActive ? 'animate-spin' : ''}`} />
+              <span>{mobIncident?.isActive ? 'MOB EN COURS !' : 'MOB (HOMME À LA MER)'}</span>
+            </button>
           </div>
         </div>
+
+        {/* Alerte Sonore & Visuelle Haute Priorité (visible dans tous les onglets) */}
+        {mobIncident?.isActive && activeTab !== 'chart' && (
+          <MobRescueModal onCenterOnMob={() => setActiveTab('chart')} />
+        )}
 
         {/* Barre d'onglets principale */}
         <div className="max-w-7xl mx-auto mt-3 flex items-center gap-1 border-t border-slate-800/80 pt-2 overflow-x-auto">

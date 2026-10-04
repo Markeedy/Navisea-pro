@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { VesselState, AisTarget, S52ColorPalette, MarineWeatherForecast, SolunarDayData, GeoCoordinate, LogbookEntry } from '../types/marine';
+import { VesselState, AisTarget, S52ColorPalette, MarineWeatherForecast, SolunarDayData, GeoCoordinate, LogbookEntry, MobIncident } from '../types/marine';
+import { NavigationCalculations } from '../utils/NavigationCalculations';
 
 interface NavigationStore {
   // État du propre navire (Own Vessel)
@@ -15,6 +16,9 @@ interface NavigationStore {
   cpaAlarmThresholdNM: number;
   tcpaAlarmThresholdMinutes: number;
   activeCollisionAlert: AisTarget | null;
+
+  // Alarme d'urgence Homme à la Mer (MOB)
+  mobIncident: MobIncident | null;
 
   // Affichage cartographique S-52
   colorPalette: S52ColorPalette;
@@ -65,6 +69,12 @@ interface NavigationStore {
   // Actions Journal de bord
   addLogbookEntry: (entry: Omit<LogbookEntry, 'id' | 'timestamp' | 'isoDate'>) => void;
   deleteLogbookEntry: (id: string) => void;
+  importLogbookEntries: (entries: LogbookEntry[]) => void;
+
+  // Actions MOB (Homme à la mer)
+  triggerMob: () => void;
+  cancelMob: () => void;
+  setMobSearchRadius: (radiusMeters: number) => void;
 }
 
 export const useNavigationStore = create<NavigationStore>((set, get) => ({
@@ -99,6 +109,8 @@ export const useNavigationStore = create<NavigationStore>((set, get) => ({
   cpaAlarmThresholdNM: 1.0, // Alarme si croisement < 1.0 NM
   tcpaAlarmThresholdMinutes: 15, // et dans moins de 15 minutes
   activeCollisionAlert: null,
+
+  mobIncident: null,
 
   colorPalette: 'DAY',
   showDepthSoundings: true,
@@ -224,15 +236,29 @@ export const useNavigationStore = create<NavigationStore>((set, get) => ({
   ],
 
   updateGpsPosition: (pos, accuracy, rawPos) => {
-    set((state) => ({
-      vessel: {
-        ...state.vessel,
-        position: pos,
-        rawPosition: rawPos || state.vessel.rawPosition,
-        accuracy,
-        timestamp: Date.now(),
-      },
-    }));
+    set((state) => {
+      let updatedMob = state.mobIncident;
+      if (updatedMob && updatedMob.isActive) {
+        const { distanceNM, initialBearing } = NavigationCalculations.calculateGreatCircle(pos, updatedMob.position);
+        updatedMob = {
+          ...updatedMob,
+          currentDistanceNM: Math.round(distanceNM * 1000) / 1000,
+          currentDistanceMeters: Math.round(distanceNM * 1852),
+          currentBearingDeg: Math.round(initialBearing * 10) / 10,
+        };
+      }
+
+      return {
+        vessel: {
+          ...state.vessel,
+          position: pos,
+          rawPosition: rawPos || state.vessel.rawPosition,
+          accuracy,
+          timestamp: Date.now(),
+        },
+        mobIncident: updatedMob,
+      };
+    });
     get().checkAnchorDrift();
   },
 
@@ -420,5 +446,70 @@ export const useNavigationStore = create<NavigationStore>((set, get) => ({
     set((state) => ({
       logbookEntries: state.logbookEntries.filter((e) => e.id !== id),
     }));
+  },
+
+  importLogbookEntries: (importedEntries) => {
+    set((state) => {
+      // Fusionner en évitant les doublons par ID
+      const existingIds = new Set(state.logbookEntries.map((e) => e.id));
+      const newItems = importedEntries.filter((e) => !existingIds.has(e.id));
+      const merged = [...newItems, ...state.logbookEntries].sort((a, b) => b.timestamp - a.timestamp);
+      return { logbookEntries: merged };
+    });
+  },
+
+  triggerMob: () => {
+    const state = get();
+    const pos = { ...state.vessel.position };
+    const now = Date.now();
+
+    const newMob: MobIncident = {
+      isActive: true,
+      timestamp: now,
+      position: pos,
+      accuracy: state.vessel.accuracy,
+      initialSog: state.vessel.sog,
+      initialCog: state.vessel.cog,
+      searchRadiusMeters: 100, // Rayon initial standard 100m
+      currentBearingDeg: (state.vessel.cog + 180) % 360,
+      currentDistanceNM: 0,
+      currentDistanceMeters: 0,
+    };
+
+    // Consignation d'urgence immédiate dans le journal de bord
+    state.addLogbookEntry({
+      position: pos,
+      sog: state.vessel.sog,
+      cog: state.vessel.cog,
+      depthBelowKeel: state.vessel.depthBelowKeel,
+      weatherSummary: {
+        windSpeedKnots: state.cachedWeather?.windSpeed10m[0] || 18,
+        windDirectionDeg: state.cachedWeather?.windDirection10m[0] || 250,
+        waveHeightMeters: state.cachedWeather?.waveHeight[0] || 1.8,
+        surfacePressureHpa: state.cachedWeather?.surfacePressure[0] || 1018,
+      },
+      category: 'SECURITY',
+      title: '🚨 DÉCLENCHEMENT URGENCE MOB (HOMME À LA MER)',
+      notes: `Alerte MOB initiée. Coordonnées fixées instantanément : ${pos.latitude.toFixed(5)}°N, ${Math.abs(pos.longitude).toFixed(5)}°W. Vitesse navire : ${state.vessel.sog} kn. Veille ASN VHF canal 16 recommandée.`,
+      crewMember: 'SYSTÈME DÉTRESSE MOB',
+    });
+
+    set({ mobIncident: newMob });
+  },
+
+  cancelMob: () => {
+    set({ mobIncident: null });
+  },
+
+  setMobSearchRadius: (radiusMeters) => {
+    set((state) => {
+      if (!state.mobIncident) return state;
+      return {
+        mobIncident: {
+          ...state.mobIncident,
+          searchRadiusMeters: Math.max(25, Math.min(5000, radiusMeters)),
+        },
+      };
+    });
   },
 }));

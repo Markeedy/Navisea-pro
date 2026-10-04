@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import { useNavigationStore } from '../store/useNavigationStore';
 import { SAMPLE_HYDROGRAPHIC_GEOJSON, S52_PALETTES, buildS52MaplibreStyle } from '../utils/s52Style';
+import { NavigationCalculations, RouteCalculationResult } from '../utils/NavigationCalculations';
+import { GeoCoordinate } from '../types/marine';
 import {
   Compass,
   Layers,
@@ -14,13 +16,25 @@ import {
   Eye,
   Sliders,
   ShieldAlert,
+  Route,
+  ArrowRightLeft,
+  XCircle,
+  Crosshair,
+  MapPin,
+  Clock,
+  Sparkles,
+  LifeBuoy,
 } from 'lucide-react';
+import { MobRescueModal } from './MobRescueModal';
 
 export const ChartPlotter: React.FC = () => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const ownVesselMarker = useRef<maplibregl.Marker | null>(null);
   const aisMarkersRef = useRef<Map<number, maplibregl.Marker>>(new Map());
+  const routeMarkerARef = useRef<maplibregl.Marker | null>(null);
+  const routeMarkerBRef = useRef<maplibregl.Marker | null>(null);
+  const mobMarkerRef = useRef<maplibregl.Marker | null>(null);
 
   const {
     vessel,
@@ -33,6 +47,7 @@ export const ChartPlotter: React.FC = () => {
     aisTargets,
     cpaAlarmThresholdNM,
     activeCollisionAlert,
+    mobIncident,
     setColorPalette,
     toggleLayer,
     setDraft,
@@ -41,6 +56,13 @@ export const ChartPlotter: React.FC = () => {
 
   const [zoomLevel, setZoomLevel] = useState(13);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+
+  // Outil de calcul Orthodromique / Loxodromique
+  const [isRouteToolActive, setIsRouteToolActive] = useState<boolean>(false);
+  const [routeDisplayMode, setRouteDisplayMode] = useState<'BOTH' | 'ORTHODROMIQUE' | 'LOXODROMIQUE'>('BOTH');
+  const [pointA, setPointA] = useState<GeoCoordinate | null>(null);
+  const [pointB, setPointB] = useState<GeoCoordinate | null>(null);
+  const [routeResult, setRouteResult] = useState<RouteCalculationResult | null>(null);
 
   const palette = useMemo(() => S52_PALETTES[colorPalette], [colorPalette]);
 
@@ -182,6 +204,78 @@ export const ChartPlotter: React.FC = () => {
           'circle-stroke-color': '#b45309',
         },
       });
+
+      // 9. Source & Couche Orthodromique (Arc de Grand Cercle)
+      m.addSource('route-ortho-source', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      m.addLayer({
+        id: 'layer-route-ortho',
+        type: 'line',
+        source: 'route-ortho-source',
+        paint: {
+          'line-color': '#06b6d4', // Cyan éclatant
+          'line-width': 3.5,
+        },
+      });
+
+      // 10. Source & Couche Loxodromique (Ligne de Rhumb Mercator)
+      m.addSource('route-loxo-source', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      m.addLayer({
+        id: 'layer-route-loxo',
+        type: 'line',
+        source: 'route-loxo-source',
+        paint: {
+          'line-color': '#f59e0b', // Ambre / Orange pointillé
+          'line-width': 2.5,
+          'line-dasharray': [4, 2],
+        },
+      });
+
+      // 11. Source & Couches Cercle de recherche MOB à rayon variable
+      m.addSource('source-mob-circle', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      m.addLayer({
+        id: 'layer-mob-circle-fill',
+        type: 'fill',
+        source: 'source-mob-circle',
+        paint: {
+          'fill-color': '#ef4444',
+          'fill-opacity': 0.18,
+        },
+      });
+      m.addLayer({
+        id: 'layer-mob-circle-line',
+        type: 'line',
+        source: 'source-mob-circle',
+        paint: {
+          'line-color': '#ef4444',
+          'line-width': 2.5,
+          'line-dasharray': [3, 2],
+        },
+      });
+
+      // 12. Vecteur de guidage vers le point MOB
+      m.addSource('source-mob-vector', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      m.addLayer({
+        id: 'layer-mob-vector',
+        type: 'line',
+        source: 'source-mob-vector',
+        paint: {
+          'line-color': '#ef4444',
+          'line-width': 3,
+          'line-dasharray': [2, 2],
+        },
+      });
     });
 
     map.current = m;
@@ -317,8 +411,295 @@ export const ChartPlotter: React.FC = () => {
     });
   };
 
+  // Formatage nautique DMM (Degrés et Minutes Décimales)
+  const formatNauticalCoords = (coord: GeoCoordinate | null) => {
+    if (!coord) return '--°--.---';
+    const latDeg = Math.floor(Math.abs(coord.latitude));
+    const latMin = ((Math.abs(coord.latitude) - latDeg) * 60).toFixed(3);
+    const latDir = coord.latitude >= 0 ? 'N' : 'S';
+
+    const lonDeg = Math.floor(Math.abs(coord.longitude));
+    const lonMin = ((Math.abs(coord.longitude) - lonDeg) * 60).toFixed(3);
+    const lonDir = coord.longitude >= 0 ? 'E' : 'W';
+
+    return `${latDeg}°${latMin}' ${latDir}, ${lonDeg.toString().padStart(3, '0')}°${lonMin}' ${lonDir}`;
+  };
+
+  // Réinitialisation de la route
+  const handleClearRoute = () => {
+    if (routeMarkerARef.current) {
+      routeMarkerARef.current.remove();
+      routeMarkerARef.current = null;
+    }
+    if (routeMarkerBRef.current) {
+      routeMarkerBRef.current.remove();
+      routeMarkerBRef.current = null;
+    }
+
+    setPointA(null);
+    setPointB(null);
+    setRouteResult(null);
+
+    if (map.current) {
+      const orthoSrc = map.current.getSource('route-ortho-source') as maplibregl.GeoJSONSource | undefined;
+      const loxoSrc = map.current.getSource('route-loxo-source') as maplibregl.GeoJSONSource | undefined;
+      if (orthoSrc) orthoSrc.setData({ type: 'FeatureCollection', features: [] });
+      if (loxoSrc) loxoSrc.setData({ type: 'FeatureCollection', features: [] });
+    }
+  };
+
+  // Inverser Départ et Arrivée
+  const handleSwapRoutePoints = () => {
+    if (!pointA || !pointB) return;
+    const tempA = { ...pointA };
+    const tempB = { ...pointB };
+    setPointA(tempB);
+    setPointB(tempA);
+    const res = NavigationCalculations.calculateRoute(tempB, tempA, vessel.sog);
+    setRouteResult(res);
+  };
+
+  // Définir le Point A comme étant la position actuelle du navire
+  const handleSetPointAFromVessel = () => {
+    const shipPos = { ...vessel.position };
+    setPointA(shipPos);
+    if (pointB) {
+      const res = NavigationCalculations.calculateRoute(shipPos, pointB, vessel.sog);
+      setRouteResult(res);
+    }
+  };
+
+  // Écouteur de clics pour l'outil de tracé de route
+  useEffect(() => {
+    if (!map.current) return;
+    const m = map.current;
+
+    const handleMapClick = (e: maplibregl.MapMouseEvent) => {
+      if (!isRouteToolActive) return;
+
+      const clicked: GeoCoordinate = {
+        latitude: Math.round(e.lngLat.lat * 100000) / 100000,
+        longitude: Math.round(e.lngLat.lng * 100000) / 100000,
+      };
+
+      if (!pointA) {
+        setPointA(clicked);
+      } else if (!pointB) {
+        setPointB(clicked);
+        const res = NavigationCalculations.calculateRoute(pointA, clicked, vessel.sog);
+        setRouteResult(res);
+      } else {
+        // Redémarrer une nouvelle route avec ce point comme nouveau départ
+        handleClearRoute();
+        setPointA(clicked);
+      }
+    };
+
+    m.on('click', handleMapClick);
+
+    if (isRouteToolActive) {
+      m.getCanvas().style.cursor = 'crosshair';
+    } else {
+      m.getCanvas().style.cursor = '';
+    }
+
+    return () => {
+      m.off('click', handleMapClick);
+      if (m.getCanvas()) {
+        m.getCanvas().style.cursor = '';
+      }
+    };
+  }, [isRouteToolActive, pointA, pointB, vessel.sog]);
+
+  // Synchronisation des marqueurs A & B et des tracés cartographiques
+  useEffect(() => {
+    if (!map.current) return;
+
+    // 1. Marqueur Point A
+    if (pointA) {
+      if (!routeMarkerARef.current) {
+        const elA = document.createElement('div');
+        elA.className = 'flex flex-col items-center cursor-pointer transform -translate-y-1/2';
+        elA.innerHTML = `
+          <div class="px-2 py-0.5 bg-emerald-600 text-white font-black text-[10px] rounded-full shadow-lg border border-white flex items-center gap-1">
+            <span>A</span>
+          </div>
+          <div class="w-1.5 h-3 bg-emerald-600 rounded-b"></div>
+        `;
+        routeMarkerARef.current = new maplibregl.Marker({ element: elA })
+          .setLngLat([pointA.longitude, pointA.latitude])
+          .addTo(map.current);
+      } else {
+        routeMarkerARef.current.setLngLat([pointA.longitude, pointA.latitude]);
+      }
+    } else if (routeMarkerARef.current) {
+      routeMarkerARef.current.remove();
+      routeMarkerARef.current = null;
+    }
+
+    // 2. Marqueur Point B
+    if (pointB) {
+      if (!routeMarkerBRef.current) {
+        const elB = document.createElement('div');
+        elB.className = 'flex flex-col items-center cursor-pointer transform -translate-y-1/2';
+        elB.innerHTML = `
+          <div class="px-2 py-0.5 bg-rose-600 text-white font-black text-[10px] rounded-full shadow-lg border border-white flex items-center gap-1">
+            <span>B</span>
+          </div>
+          <div class="w-1.5 h-3 bg-rose-600 rounded-b"></div>
+        `;
+        routeMarkerBRef.current = new maplibregl.Marker({ element: elB })
+          .setLngLat([pointB.longitude, pointB.latitude])
+          .addTo(map.current);
+      } else {
+        routeMarkerBRef.current.setLngLat([pointB.longitude, pointB.latitude]);
+      }
+    } else if (routeMarkerBRef.current) {
+      routeMarkerBRef.current.remove();
+      routeMarkerBRef.current = null;
+    }
+
+    // 3. Mise à jour des tracés de lignes géodésiques
+    if (routeResult) {
+      const orthoSrc = map.current.getSource('route-ortho-source') as maplibregl.GeoJSONSource | undefined;
+      const loxoSrc = map.current.getSource('route-loxo-source') as maplibregl.GeoJSONSource | undefined;
+
+      if (orthoSrc) {
+        orthoSrc.setData({
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'LineString',
+            coordinates: routeResult.orthoPoints.map((p) => [p.longitude, p.latitude]),
+          },
+        });
+      }
+
+      if (loxoSrc) {
+        loxoSrc.setData({
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'LineString',
+            coordinates: routeResult.loxoPoints.map((p) => [p.longitude, p.latitude]),
+          },
+        });
+      }
+
+      // Visibilité des couches selon routeDisplayMode
+      if (map.current.getLayer('layer-route-ortho')) {
+        map.current.setLayoutProperty(
+          'layer-route-ortho',
+          'visibility',
+          routeDisplayMode === 'BOTH' || routeDisplayMode === 'ORTHODROMIQUE' ? 'visible' : 'none'
+        );
+      }
+      if (map.current.getLayer('layer-route-loxo')) {
+        map.current.setLayoutProperty(
+          'layer-route-loxo',
+          'visibility',
+          routeDisplayMode === 'BOTH' || routeDisplayMode === 'LOXODROMIQUE' ? 'visible' : 'none'
+        );
+      }
+    }
+  }, [pointA, pointB, routeResult, routeDisplayMode]);
+
+  // Synchronisation cartographique du point MOB et du cercle de recherche variable
+  useEffect(() => {
+    if (!map.current) return;
+
+    if (mobIncident && mobIncident.isActive) {
+      // 1. Marqueur Homme à la Mer clignotant
+      if (!mobMarkerRef.current) {
+        const elMob = document.createElement('div');
+        elMob.className = 'flex flex-col items-center cursor-pointer';
+        elMob.innerHTML = `
+          <div class="relative flex items-center justify-center">
+            <div class="absolute w-12 h-12 rounded-full bg-red-600/40 animate-ping"></div>
+            <div class="w-9 h-9 rounded-full bg-red-600 border-2 border-white flex items-center justify-center text-white shadow-2xl font-black text-xs">
+              <svg class="w-5 h-5 text-white animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <circle cx="12" cy="12" r="10"></circle>
+                <circle cx="12" cy="12" r="4"></circle>
+                <line x1="4.93" y1="4.93" x2="9.17" y2="9.17"></line>
+                <line x1="14.83" y1="14.83" x2="19.07" y2="19.07"></line>
+                <line x1="14.83" y1="9.17" x2="19.07" y2="4.93"></line>
+                <line x1="4.93" y1="14.83" x2="9.17" y2="19.07"></line>
+              </svg>
+            </div>
+          </div>
+          <span class="mt-1 bg-red-600 text-white font-black text-[9px] px-1.5 py-0.2 rounded shadow uppercase tracking-wider">
+            MOB DATUM
+          </span>
+        `;
+        mobMarkerRef.current = new maplibregl.Marker({ element: elMob })
+          .setLngLat([mobIncident.position.longitude, mobIncident.position.latitude])
+          .addTo(map.current);
+      } else {
+        mobMarkerRef.current.setLngLat([mobIncident.position.longitude, mobIncident.position.latitude]);
+      }
+
+      // 2. Polygone géodésique du cercle de recherche variable
+      const circleCoords = NavigationCalculations.createGeodesicCircle(
+        mobIncident.position,
+        mobIncident.searchRadiusMeters,
+        64
+      );
+
+      const circleSrc = map.current.getSource('source-mob-circle') as maplibregl.GeoJSONSource | undefined;
+      if (circleSrc) {
+        circleSrc.setData({
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'Polygon',
+            coordinates: [circleCoords],
+          },
+        });
+      }
+
+      // 3. Vecteur de ralliement direct navire -> MOB
+      const vectorSrc = map.current.getSource('source-mob-vector') as maplibregl.GeoJSONSource | undefined;
+      if (vectorSrc) {
+        vectorSrc.setData({
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'LineString',
+            coordinates: [
+              [vessel.position.longitude, vessel.position.latitude],
+              [mobIncident.position.longitude, mobIncident.position.latitude],
+            ],
+          },
+        });
+      }
+    } else {
+      // Nettoyage si MOB inactif
+      if (mobMarkerRef.current) {
+        mobMarkerRef.current.remove();
+        mobMarkerRef.current = null;
+      }
+      const circleSrc = map.current?.getSource('source-mob-circle') as maplibregl.GeoJSONSource | undefined;
+      if (circleSrc) circleSrc.setData({ type: 'FeatureCollection', features: [] });
+
+      const vectorSrc = map.current?.getSource('source-mob-vector') as maplibregl.GeoJSONSource | undefined;
+      if (vectorSrc) vectorSrc.setData({ type: 'FeatureCollection', features: [] });
+    }
+  }, [mobIncident, vessel.position]);
+
+  const handleCenterOnMob = () => {
+    if (!map.current || !mobIncident) return;
+    map.current.flyTo({
+      center: [mobIncident.position.longitude, mobIncident.position.latitude],
+      zoom: 15.5,
+      speed: 1.2,
+    });
+  };
+
   return (
     <div className="relative w-full h-[620px] rounded-xl overflow-hidden border border-slate-800 bg-slate-950 shadow-2xl">
+      {/* Alarme Visuelle & Sonore MOB */}
+      <MobRescueModal onCenterOnMob={handleCenterOnMob} />
+
       {/* Conteneur MapLibre GL */}
       <div ref={mapContainer} className="w-full h-full" />
 
@@ -462,6 +843,24 @@ export const ChartPlotter: React.FC = () => {
             AIS ({aisTargets.size})
           </button>
 
+          {/* Bouton Outil Calcul de Route Orthodromique / Loxodromique */}
+          <button
+            onClick={() => {
+              const next = !isRouteToolActive;
+              setIsRouteToolActive(next);
+              if (!next) handleClearRoute();
+            }}
+            className={`px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1.5 border transition-all ${
+              isRouteToolActive
+                ? 'bg-cyan-600 border-cyan-400 text-white shadow-lg shadow-cyan-600/40 animate-pulse'
+                : 'border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800'
+            }`}
+            title="Activer l'outil de calcul de route orthodromique et loxodromique entre deux points cliqués"
+          >
+            <Route className="w-3.5 h-3.5 text-cyan-300" />
+            <span>Route Ortho/Loxo</span>
+          </button>
+
           {/* Bouton réglages tirant d'eau / Safety Contour */}
           <button
             onClick={() => setShowSettingsModal(!showSettingsModal)}
@@ -530,6 +929,185 @@ export const ChartPlotter: React.FC = () => {
               </p>
             )}
           </div>
+        </div>
+      )}
+
+      {/* PANNEAU FLOTTANT : CALCULATEUR DE ROUTE ORTHODROMIQUE & LOXODROMIQUE */}
+      {isRouteToolActive && (
+        <div className="absolute top-16 left-4 right-4 md:right-auto md:w-[420px] bg-slate-900/95 border border-cyan-500/50 rounded-xl p-4 shadow-2xl backdrop-blur-md z-40 text-xs space-y-3 animate-fade-in">
+          {/* En-tête de l'outil */}
+          <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+            <div className="flex items-center gap-2">
+              <Route className="w-4 h-4 text-cyan-400" />
+              <span className="font-bold text-slate-100 uppercase tracking-wide">
+                Calculateur de Route Ortho / Loxo
+              </span>
+            </div>
+            <button
+              onClick={() => {
+                setIsRouteToolActive(false);
+                handleClearRoute();
+              }}
+              className="text-slate-400 hover:text-white p-1"
+              title="Fermer et effacer"
+            >
+              <XCircle className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Guide d'utilisation étape par étape */}
+          {!pointA ? (
+            <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-2.5 space-y-2">
+              <p className="text-[11px] text-slate-300 flex items-center gap-1.5">
+                <Crosshair className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Cliquez sur la carte pour définir le <b>Point de Départ (A)</b>.</span>
+              </p>
+              <button
+                onClick={handleSetPointAFromVessel}
+                className="w-full py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 rounded text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <Navigation className="w-3.5 h-3.5 text-cyan-400" />
+                Définir Départ = Position Actuelle de mon Navire
+              </button>
+            </div>
+          ) : !pointB ? (
+            <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-2.5 space-y-2">
+              <div className="text-[11px] flex items-center justify-between text-slate-300">
+                <span className="text-emerald-400 font-bold flex items-center gap-1">
+                  <MapPin className="w-3.5 h-3.5" /> Point A (Départ) :
+                </span>
+                <span className="font-mono text-white">{formatNauticalCoords(pointA)}</span>
+              </div>
+              <p className="text-[11px] text-cyan-300 flex items-center gap-1.5 pt-1 border-t border-slate-800/80">
+                <Crosshair className="w-3.5 h-3.5 text-rose-400" />
+                <span>Cliquez sur la carte pour définir le <b>Point d'Arrivée (B)</b>.</span>
+              </p>
+            </div>
+          ) : routeResult && (
+            <div className="space-y-3">
+              {/* Sélecteur de mode d'affichage des tracés */}
+              <div className="flex items-center justify-between gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                <button
+                  onClick={() => setRouteDisplayMode('BOTH')}
+                  className={`flex-1 py-1 rounded text-[10px] font-bold transition-colors ${
+                    routeDisplayMode === 'BOTH'
+                      ? 'bg-cyan-600 text-white shadow'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Comparaison (Les 2)
+                </button>
+                <button
+                  onClick={() => setRouteDisplayMode('ORTHODROMIQUE')}
+                  className={`flex-1 py-1 rounded text-[10px] font-bold transition-colors ${
+                    routeDisplayMode === 'ORTHODROMIQUE'
+                      ? 'bg-cyan-600 text-white shadow'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Orthodromie
+                </button>
+                <button
+                  onClick={() => setRouteDisplayMode('LOXODROMIQUE')}
+                  className={`flex-1 py-1 rounded text-[10px] font-bold transition-colors ${
+                    routeDisplayMode === 'LOXODROMIQUE'
+                      ? 'bg-amber-600 text-white shadow'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Loxodromie
+                </button>
+              </div>
+
+              {/* Tableau comparatif des métriques Ortho vs Loxo */}
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                {/* Carte Orthodromie (Grand Cercle) */}
+                <div className="bg-slate-950 border border-cyan-500/40 rounded-lg p-2.5 space-y-1">
+                  <div className="flex items-center justify-between text-[10px] uppercase font-bold text-cyan-400">
+                    <span>Orthodromie</span>
+                    <span className="w-2 h-2 rounded-full bg-cyan-400" />
+                  </div>
+                  <div>
+                    <span className="text-base font-black font-mono text-white">
+                      {routeResult.orthoDistanceNM}
+                    </span>
+                    <span className="text-[10px] text-slate-400 ml-1">NM</span>
+                    <span className="text-[10px] text-slate-500 block">({routeResult.orthoDistanceKm} km)</span>
+                  </div>
+                  <div className="text-[10px] text-slate-300 font-mono pt-1 border-t border-slate-900">
+                    <div>Cap Init (Ti) : <b className="text-cyan-300">{routeResult.initialBearingDeg}°</b></div>
+                    <div>Cap Final (Tf) : <b className="text-cyan-300">{routeResult.finalBearingDeg}°</b></div>
+                  </div>
+                </div>
+
+                {/* Carte Loxodromie (Ligne de Rhumb) */}
+                <div className="bg-slate-950 border border-amber-500/40 rounded-lg p-2.5 space-y-1">
+                  <div className="flex items-center justify-between text-[10px] uppercase font-bold text-amber-400">
+                    <span>Loxodromie</span>
+                    <span className="w-2 h-2 rounded-full bg-amber-400" />
+                  </div>
+                  <div>
+                    <span className="text-base font-black font-mono text-white">
+                      {routeResult.loxoDistanceNM}
+                    </span>
+                    <span className="text-[10px] text-slate-400 ml-1">NM</span>
+                    <span className="text-[10px] text-slate-500 block">({routeResult.loxoDistanceKm} km)</span>
+                  </div>
+                  <div className="text-[10px] text-slate-300 font-mono pt-1 border-t border-slate-900">
+                    <div>Cap Constant (Tc) : <b className="text-amber-300">{routeResult.constantBearingDeg}°</b></div>
+                    <div className="text-slate-500 text-[9px]">Ligne droite Mercator</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Différentiel et ETA */}
+              <div className="bg-slate-950/70 border border-slate-800 rounded-lg p-2.5 space-y-1.5 text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400 flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-cyan-400" /> Gain Orthodromique :
+                  </span>
+                  <span className="font-mono font-bold text-emerald-400">
+                    {routeResult.distanceGainNM > 0 ? `-${routeResult.distanceGainNM} NM (-${routeResult.gainPercent}%)` : 'Quasi identique (< 0.05 NM)'}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between border-t border-slate-900 pt-1">
+                  <span className="text-slate-400 flex items-center gap-1">
+                    <Clock className="w-3 h-3 text-indigo-400" /> Temps de route estimé (ETA) :
+                  </span>
+                  <span className="font-mono font-bold text-indigo-300">
+                    {routeResult.estimatedTimeHours} h (à {vessel.sog} kn)
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-500 text-right">
+                  Arrivée prévue : {routeResult.etaDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </div>
+              </div>
+
+              {/* Coordonnées détaillées */}
+              <div className="text-[10px] font-mono text-slate-400 bg-slate-950/60 p-2 rounded border border-slate-900 space-y-0.5">
+                <div>A : <span className="text-slate-200">{formatNauticalCoords(pointA)}</span></div>
+                <div>B : <span className="text-slate-200">{formatNauticalCoords(pointB)}</span></div>
+              </div>
+
+              {/* Actions rapides */}
+              <div className="flex items-center gap-2 pt-1 border-t border-slate-800">
+                <button
+                  onClick={handleSwapRoutePoints}
+                  className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold text-[11px] flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <ArrowRightLeft className="w-3.5 h-3.5 text-cyan-400" />
+                  Inverser A ↔ B
+                </button>
+                <button
+                  onClick={handleClearRoute}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-red-400 rounded font-semibold text-[11px] transition-colors"
+                >
+                  Effacer
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
